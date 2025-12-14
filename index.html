@@ -61,11 +61,15 @@
     return sum/norm;
   }
 
-  // ===== particles in a flow field =====
-  const PCOUNT = 900;
+  // ===== particles (snowflakes) =====
+  const PCOUNT = 420;
   const parts = new Float32Array(PCOUNT*4); // x,y, vx, vy
   const life  = new Float32Array(PCOUNT);
-  const colr  = new Uint8Array(PCOUNT*3);    // packed RGB 0..255
+  const size  = new Float32Array(PCOUNT);   // rendered size multiplier
+  const spin  = new Float32Array(PCOUNT);   // angular speed
+  const angle = new Float32Array(PCOUNT);   // current rotation
+  const img   = new Image();
+  img.src = 'snowflake-svgrepo-com.svg';
 
   function resize(){
     w = Math.floor(innerWidth * DPR); h = Math.floor(innerHeight * DPR);
@@ -73,28 +77,14 @@
     ctx.setTransform(1,0,0,1,0,0);
   }
 
-  // палитра: насыщённые кластеры для контраста
-  function pickHue(){
-    const r = Math.random();
-    if (r < 0.45) return rand(200, 255);      // сине-циан
-    if (r < 0.8)  return rand(300, 340);      // маджента/фуксия
-    return rand(30, 60);                       // янтарный
-  }
-
-  function hslToRgb(h,s,l){
-    const a = s*Math.min(l,1-l);
-    const f = (n,k=(n+h*12)%12)=>l - a*Math.max(Math.min(k-3,9-k,1),-1);
-    return [f(0),f(8),f(4)];
-  }
-
   function reset(i){
     parts[i*4+0] = rand(0,w);
-    parts[i*4+1] = rand(0,h);
-    parts[i*4+2] = 0; parts[i*4+3] = 0;
-    life[i] = rand(0.5, 1.5) * 800;
-    const hue = pickHue();
-    const c = hslToRgb(hue/360, 0.78, 0.60);
-    colr[i*3+0]=(c[0]*255)|0; colr[i*3+1]=(c[1]*255)|0; colr[i*3+2]=(c[2]*255)|0;
+    parts[i*4+1] = rand(-h*0.5, h*0.2);
+    parts[i*4+2] = rand(-0.2, 0.2); parts[i*4+3] = rand(0.35, 1.2);
+    life[i] = rand(0.8, 1.8) * 900;
+    size[i] = rand(0.7, 1.6);
+    spin[i] = rand(-0.01, 0.01);
+    angle[i] = rand(0, TAU);
   }
 
   for(let i=0;i<PCOUNT;i++) reset(i);
@@ -115,25 +105,20 @@
   window.addEventListener('pointerup', ()=>pointer.down=false);
   window.addEventListener('resize', resize, { passive:true });
 
-  // ===== РЕЖИМЫ =====
-  const FIELD_NAMES = ['волны','турбулентность','спирали','вихри (curl)'];
-  let field = 0;                 // 0..3
+  // ===== настройки =====
   let attract = false;           // false = отталкивает, true = притягивает
 
-  function cycleField(delta=1){ field = (field + delta + FIELD_NAMES.length) % FIELD_NAMES.length; updateUi(); }
   function toggleMagnet(){ attract = !attract; updateUi(); }
 
   function updateUi(){
     if (!ui) return;
-    ui.innerHTML = `Пробел — смена поля • M — магнит (${attract? 'притягивает' : 'отталкивает'}) • Клик — <b>буст магнита</b> • Поле: <b>${FIELD_NAMES[field]}</b>`;
+    ui.innerHTML = `M — магнит (${attract? 'притягивает' : 'отталкивает'}) • Клик — <b>буст</b>`;
   }
 
-  // Клавиатура: Space — поле, M — магнит; 1..4 — прямой выбор поля
+  // Клавиатура: M — магнит
   window.addEventListener('keydown', (e)=>{
     const k = e.key.toLowerCase();
-    if (e.code === 'Space' || k === ' ') { e.preventDefault(); cycleField(+1); return; }
     if (k === 'm') { toggleMagnet(); return; }
-    if (k === '1' || k === '2' || k === '3' || k === '4') { field = parseInt(k,10)-1; updateUi(); return; }
   });
 
   resize();
@@ -157,29 +142,17 @@
 
     const px = pointer.x, py = pointer.y;
 
-    // рисуем в additive для «свечения»
+    // рисуем снежинки поверх мягкого шлейфа
     ctx.globalCompositeOperation = 'lighter';
 
     for(let i=0;i<PCOUNT;i++){
       let x=parts[i*4], y=parts[i*4+1], vx=parts[i*4+2], vy=parts[i*4+3];
 
-      // flow field
-      const nx = (x/w)*1.8 + t*0.6, ny = (y/h)*1.8 - t*0.4;
-      let ax=0, ay=0;
-      if (field===0) {
-        const ang = fbm(nx,ny,4)*TAU; ax = Math.cos(ang)*0.06; ay = Math.sin(ang)*0.06;
-      } else if (field===1) {
-        const ang = (fbm(nx,ny,5)*4.0 + fbm(ny,nx,3)) % 1 * TAU; ax = Math.cos(ang)*0.065; ay = Math.sin(ang)*0.065;
-      } else if (field===2) {
-        const ang = Math.atan2(y-h/2,x-w/2) + fbm(nx*0.8,ny*0.8,4)*0.7; ax = Math.cos(ang)*0.07; ay = Math.sin(ang)*0.07;
-      } else {
-        // Curl-noise (несжимаемый вихревой поток)
-        const e = 0.0015;
-        const nL = fbm(nx+e, ny, 4), nR = fbm(nx-e, ny, 4);
-        const nU = fbm(nx, ny+e, 4), nD = fbm(nx, ny-e, 4);
-        const gx = (nL - nR)/(2*e), gy = (nU - nD)/(2*e);
-        ax = gy * 0.20; ay = -gx * 0.20;
-      }
+      // базовый «ветер» и гравитация
+      const nx = (x/w)*1.2 + t*0.35;
+      const wind = (fbm(nx, t*0.5, 3) - 0.5) * 0.28;
+      let ax = wind;
+      let ay = 0.012 + (0.008 * size[i]);
 
       // магнит: отталкивание/притяжение; усиление по клику работает ТОЛЬКО в режиме притяжения
       const dx = (px - x), dy = (py - y);
@@ -202,33 +175,24 @@
       x += vx; y += vy;
 
       // перезапуск за пределами/по жизни
-      if (--life[i] < 0 || x< -20 || y< -20 || x>w+20 || y>h+20) reset(i);
-      else { parts[i*4]=x; parts[i*4+1]=y; parts[i*4+2]=vx; parts[i*4+3]=vy; }
+      if (--life[i] < 0 || x< -40 || y>h+40 || x>w+40) reset(i);
+      else { parts[i*4]=x; parts[i*4+1]=y; parts[i*4+2]=vx; parts[i*4+3]=vy; angle[i]+=spin[i]; }
 
-      // визуал
-      const vmag = Math.hypot(vx,vy);
-      const lw = (0.6 + vmag*1.8) * DPR;
-      const alpha = clamp(0.045 + vmag*0.12, 0.045, 0.35);
-
+      // визуал: снежинки с лёгкой парящей прозрачностью
+      const alpha = clamp(0.35 + vy*0.04, 0.25, 0.82);
+      const sz = (18 * size[i]) * DPR;
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.rotate(angle[i]);
       ctx.globalAlpha = alpha;
-      ctx.lineWidth = lw;
-
-      ctx.beginPath();
-      ctx.moveTo(x, y);
-      ctx.lineTo(x - vx*1.9, y - vy*1.9);
-
-      const r = colr[i*3+0], g = colr[i*3+1], b = colr[i*3+2];
-      ctx.strokeStyle = `rgb(${r},${g},${b})`;
-      ctx.stroke();
-
-      // искорки на быстрых частицах
-      if (vmag > 1.25 && Math.random() < 0.0025){
-        ctx.globalAlpha = clamp(0.25 + vmag*0.08, 0.25, 0.6);
+      if (img.complete) ctx.drawImage(img, -sz/2, -sz/2, sz, sz);
+      else {
+        ctx.fillStyle = 'rgba(255,255,255,0.6)';
         ctx.beginPath();
-        ctx.arc(x, y, (0.6 + Math.min(1.6, vmag*0.6)) * DPR, 0, TAU);
-        ctx.fillStyle = `rgb(${r},${g},${b})`;
+        ctx.arc(0,0,sz*0.25,0,TAU);
         ctx.fill();
       }
+      ctx.restore();
     }
 
     // вернуть нормальную композицию и добавить виньетку
