@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Турбулентность — контраст</title>
+  <style>
+    :root { color-scheme: dark; }
+    html, body { margin:0; height:100%; background:#05060a; overflow:hidden; }
+    #c { position:fixed; inset:0; width:100%; height:100%; display:block; }
+    /* мягкий блик, завязанный на позицию курсора */
+    .glow{
+      position:fixed; inset:0; pointer-events:none;
+      --mx:50%; --my:50%;
+      background:
+        radial-gradient(32vmax 32vmax at var(--mx) var(--my), rgba(255,255,255,0.12), transparent 55%),
+        radial-gradient(90vmax 90vmax at 50% 50%, rgba(100,0,255,0.06), transparent 70%);
+      mix-blend-mode: screen;
+      filter: saturate(120%);
+    }
+    .ui{ position:fixed; left:12px; bottom:12px; font:12px/1.2 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; color:#c9d0ff; opacity:.7; user-select:none; }
+    .ui b{ color:#fff; }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+  <div class="glow"></div>
+  <div class="ui" id="ui"></div>
+
+<script>
+(() => {
+  const DPR = Math.min(window.devicePixelRatio || 1, 2);
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha:false });
+  let w=0, h=0, t=0, animId=0, frame=0;
+
+  // ===== utils =====
+  const rand = (a,b)=>a + Math.random()*(b-a);
+  const TAU = Math.PI*2;
+  const clamp=(x,a,b)=>x<a?a:x>b?b:x;
+
+  // lightweight Perlin-ish noise (value noise + smoothing)
+  const N = 256, perm = new Uint8Array(N*2);
+  for (let i=0;i<N;i++) perm[i]=i;
+  for (let i=N-1;i>0;i--) { const j=(Math.random()* (i+1))|0; [perm[i],perm[j]]=[perm[j],perm[i]]; }
+  for (let i=0;i<N;i++) perm[i+N]=perm[i];
+
+  const fade = x => x*x*x*(x*(x*6-15)+10);
+  function vhash(ix,iy){ return perm[(ix + perm[iy & 255]) & 255]/255; }
+  function vnoise(x,y){
+    const ix = Math.floor(x), iy = Math.floor(y);
+    const fx = x-ix, fy = y-iy;
+    const v00=vhash(ix,iy), v10=vhash(ix+1,iy), v01=vhash(ix,iy+1), v11=vhash(ix+1,iy+1);
+    const ux=fade(fx), uy=fade(fy);
+    const xa=v00*(1-ux)+v10*ux, xb=v01*(1-ux)+v11*ux;
+    return xa*(1-uy)+xb*uy;
+  }
+  function fbm(x,y,oct=4){
+    let amp=1, freq=1, sum=0, norm=0;
+    for(let i=0;i<oct;i++){ sum += vnoise(x*freq,y*freq)*amp; norm += amp; amp*=0.5; freq*=2.03; }
+    return sum/norm;
+  }
+
+  // ===== particles in a flow field =====
+  const PCOUNT = 900;
+  const parts = new Float32Array(PCOUNT*4); // x,y, vx, vy
+  const life  = new Float32Array(PCOUNT);
+  const colr  = new Uint8Array(PCOUNT*3);    // packed RGB 0..255
+
+  function resize(){
+    w = Math.floor(innerWidth * DPR); h = Math.floor(innerHeight * DPR);
+    canvas.width = w; canvas.height = h;
+    ctx.setTransform(1,0,0,1,0,0);
+  }
+
+  // палитра: насыщённые кластеры для контраста
+  function pickHue(){
+    const r = Math.random();
+    if (r < 0.45) return rand(200, 255);      // сине-циан
+    if (r < 0.8)  return rand(300, 340);      // маджента/фуксия
+    return rand(30, 60);                       // янтарный
+  }
+
+  function hslToRgb(h,s,l){
+    const a = s*Math.min(l,1-l);
+    const f = (n,k=(n+h*12)%12)=>l - a*Math.max(Math.min(k-3,9-k,1),-1);
+    return [f(0),f(8),f(4)];
+  }
+
+  function reset(i){
+    parts[i*4+0] = rand(0,w);
+    parts[i*4+1] = rand(0,h);
+    parts[i*4+2] = 0; parts[i*4+3] = 0;
+    life[i] = rand(0.5, 1.5) * 800;
+    const hue = pickHue();
+    const c = hslToRgb(hue/360, 0.78, 0.60);
+    colr[i*3+0]=(c[0]*255)|0; colr[i*3+1]=(c[1]*255)|0; colr[i*3+2]=(c[2]*255)|0;
+  }
+
+  for(let i=0;i<PCOUNT;i++) reset(i);
+
+  // ===== interaction & controls =====
+  const pointer = { x:0, y:0, down:false };
+  const glowEl = document.querySelector('.glow');
+  const ui = document.getElementById('ui');
+
+  function setGlow(x,y){
+    if (!glowEl) return;
+    const g = glowEl.style;
+    g.setProperty('--mx', (x/innerWidth*100).toFixed(2) + '%');
+    g.setProperty('--my', (y/innerHeight*100).toFixed(2) + '%');
+  }
+  window.addEventListener('pointermove', e=>{ pointer.x = e.clientX*DPR; pointer.y=e.clientY*DPR; setGlow(e.clientX, e.clientY); });
+  window.addEventListener('pointerdown', ()=>pointer.down=true);
+  window.addEventListener('pointerup', ()=>pointer.down=false);
+  window.addEventListener('resize', resize, { passive:true });
+
+  // ===== РЕЖИМЫ =====
+  const FIELD_NAMES = ['волны','турбулентность','спирали','вихри (curl)'];
+  let field = 0;                 // 0..3
+  let attract = false;           // false = отталкивает, true = притягивает
+
+  function cycleField(delta=1){ field = (field + delta + FIELD_NAMES.length) % FIELD_NAMES.length; updateUi(); }
+  function toggleMagnet(){ attract = !attract; updateUi(); }
+
+  function updateUi(){
+    if (!ui) return;
+    ui.innerHTML = `Пробел — смена поля • M — магнит (${attract? 'притягивает' : 'отталкивает'}) • Клик — <b>буст магнита</b> • Поле: <b>${FIELD_NAMES[field]}</b>`;
+  }
+
+  // Клавиатура: Space — поле, M — магнит; 1..4 — прямой выбор поля
+  window.addEventListener('keydown', (e)=>{
+    const k = e.key.toLowerCase();
+    if (e.code === 'Space' || k === ' ') { e.preventDefault(); cycleField(+1); return; }
+    if (k === 'm') { toggleMagnet(); return; }
+    if (k === '1' || k === '2' || k === '3' || k === '4') { field = parseInt(k,10)-1; updateUi(); return; }
+  });
+
+  resize();
+  updateUi();
+
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  // константы магнитов
+  const MAG_BASE = 5;        // сила магнита по умолчанию (притяжение/отталкивание)
+  const MAG_BOOST = 20;       // буст при зажатой кнопке мыши для обоих режимов
+
+  function step(){
+    t += 0.0028; frame++;
+
+    // базовая подложка — длинные шлейфы
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = 'rgba(3,4,7,0.12)';
+    ctx.fillRect(0,0,w,h);
+
+    const px = pointer.x, py = pointer.y;
+
+    // рисуем в additive для «свечения»
+    ctx.globalCompositeOperation = 'lighter';
+
+    for(let i=0;i<PCOUNT;i++){
+      let x=parts[i*4], y=parts[i*4+1], vx=parts[i*4+2], vy=parts[i*4+3];
+
+      // flow field
+      const nx = (x/w)*1.8 + t*0.6, ny = (y/h)*1.8 - t*0.4;
+      let ax=0, ay=0;
+      if (field===0) {
+        const ang = fbm(nx,ny,4)*TAU; ax = Math.cos(ang)*0.06; ay = Math.sin(ang)*0.06;
+      } else if (field===1) {
+        const ang = (fbm(nx,ny,5)*4.0 + fbm(ny,nx,3)) % 1 * TAU; ax = Math.cos(ang)*0.065; ay = Math.sin(ang)*0.065;
+      } else if (field===2) {
+        const ang = Math.atan2(y-h/2,x-w/2) + fbm(nx*0.8,ny*0.8,4)*0.7; ax = Math.cos(ang)*0.07; ay = Math.sin(ang)*0.07;
+      } else {
+        // Curl-noise (несжимаемый вихревой поток)
+        const e = 0.0015;
+        const nL = fbm(nx+e, ny, 4), nR = fbm(nx-e, ny, 4);
+        const nU = fbm(nx, ny+e, 4), nD = fbm(nx, ny-e, 4);
+        const gx = (nL - nR)/(2*e), gy = (nU - nD)/(2*e);
+        ax = gy * 0.20; ay = -gx * 0.20;
+      }
+
+      // магнит: отталкивание/притяжение; усиление по клику работает ТОЛЬКО в режиме притяжения
+      const dx = (px - x), dy = (py - y);
+      const d2 = dx*dx + dy*dy + 25; // +softening радиус 5px
+      const base = pointer.down ? MAG_BOOST : MAG_BASE; // единая сила для обоих режимов
+      const sign = attract ? +1 : -1;
+      let fx = sign * base * dx / d2;
+      let fy = sign * base * dy / d2;
+      // ограничим максимальное ускорение от магнита
+      const fmag = Math.hypot(fx,fy);
+      const fcap = pointer.down ? 2.0 : 0.8;
+      if (fmag > fcap){ const k = fcap / fmag; fx *= k; fy *= k; }
+
+      vx += ax + fx;
+      vy += ay + fy;
+
+      // лёгкое трение
+      vx *= 0.984; vy *= 0.984;
+
+      x += vx; y += vy;
+
+      // перезапуск за пределами/по жизни
+      if (--life[i] < 0 || x< -20 || y< -20 || x>w+20 || y>h+20) reset(i);
+      else { parts[i*4]=x; parts[i*4+1]=y; parts[i*4+2]=vx; parts[i*4+3]=vy; }
+
+      // визуал
+      const vmag = Math.hypot(vx,vy);
+      const lw = (0.6 + vmag*1.8) * DPR;
+      const alpha = clamp(0.045 + vmag*0.12, 0.045, 0.35);
+
+      ctx.globalAlpha = alpha;
+      ctx.lineWidth = lw;
+
+      ctx.beginPath();
+      ctx.moveTo(x, y);
+      ctx.lineTo(x - vx*1.9, y - vy*1.9);
+
+      const r = colr[i*3+0], g = colr[i*3+1], b = colr[i*3+2];
+      ctx.strokeStyle = `rgb(${r},${g},${b})`;
+      ctx.stroke();
+
+      // искорки на быстрых частицах
+      if (vmag > 1.25 && Math.random() < 0.0025){
+        ctx.globalAlpha = clamp(0.25 + vmag*0.08, 0.25, 0.6);
+        ctx.beginPath();
+        ctx.arc(x, y, (0.6 + Math.min(1.6, vmag*0.6)) * DPR, 0, TAU);
+        ctx.fillStyle = `rgb(${r},${g},${b})`;
+        ctx.fill();
+      }
+    }
+
+    // вернуть нормальную композицию и добавить виньетку
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.globalAlpha = 1;
+    const grd = ctx.createRadialGradient(w/2,h/2,0,w/2,h/2,Math.max(w,h)*0.72);
+    grd.addColorStop(0,'rgba(0,0,0,0)');
+    grd.addColorStop(1,'rgba(0,0,0,0.12)');
+    ctx.fillStyle = grd; ctx.fillRect(0,0,w,h);
+
+    animId = requestAnimationFrame(step);
+  }
+
+  animId = requestAnimationFrame(step);
+
+  // остановка при скрытии вкладки
+  document.addEventListener('visibilitychange', ()=>{
+    if (document.hidden) cancelAnimationFrame(animId);
+    else animId = requestAnimationFrame(step);
+  }, { passive:true });
+})();
+</script>
+</body>
+</html>
